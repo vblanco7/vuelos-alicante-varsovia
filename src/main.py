@@ -19,15 +19,6 @@ HEADERS_RYANAIR = {
 }
 
 
-def _fechas_rango(dias: int = 120, paso: int = 7) -> list[str]:
-    """Genera fechas semanales para los próximos N días."""
-    hoy = datetime.now(timezone.utc)
-    return [
-        (hoy + timedelta(days=i)).strftime("%Y-%m-%d")
-        for i in range(0, dias, paso)
-    ]
-
-
 # ── Ryanair ──────────────────────────────────────────────────────────────────
 
 def buscar_ryanair(origen: str, destino: str) -> dict | None:
@@ -109,16 +100,14 @@ def enviar_telegram(mensaje: str) -> None:
 
 
 def main():
-    fechas = _fechas_rango()
-
     # ALC → Varsovia
-    ry_ida = buscar_ryanair("ALC", "WMI")   # Ryanair usa Modlin
-    wz_ida = buscar_wizzair("ALC", "WAW", fechas)  # Wizz Air usa Chopin
+    ry_ida = buscar_ryanair("ALC", "WMI")        # Ryanair usa Modlin
+    wz_ida = buscar_wizzair("ALC", "WAW")         # Wizz Air usa Chopin
     ida = mejor_de(ry_ida, wz_ida)
 
     # Varsovia → ALC
     ry_vuelta = buscar_ryanair("WMI", "ALC")
-    wz_vuelta = buscar_wizzair("WAW", "ALC", fechas)
+    wz_vuelta = buscar_wizzair("WAW", "ALC")
     vuelta = mejor_de(ry_vuelta, wz_vuelta)
 
     hoy_str = datetime.now(timezone.utc).strftime("%d/%m/%Y")

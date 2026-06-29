@@ -18,8 +18,11 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Instalar dependencias
+      - name: Instalar dependencias Python
         run: pip install -r requirements.txt
+
+      - name: Instalar Chromium para Playwright
+        run: playwright install chromium --with-deps
 
       - name: Buscar vuelos y notificar por Telegram
         env:
