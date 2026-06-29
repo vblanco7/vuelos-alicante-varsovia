@@ -80,11 +80,18 @@ def formatear(vuelo: dict | None, label_origen: str, label_destino: str) -> str:
             f"✈️ <b>{label_origen} → {label_destino}</b>\n"
             f"Sin vuelos directos disponibles en los próximos 4 meses."
         )
+    simbolo = "€" if vuelo["moneda"] in ("EUR", "€") else vuelo["moneda"]
+    vuelo_str = f" {vuelo['vuelo']}" if vuelo.get("vuelo") else ""
+    horas = (
+        f"  {vuelo['hora_salida']} → {vuelo['hora_llegada']}"
+        if vuelo.get("hora_salida") and vuelo["hora_salida"] != "?"
+        else ""
+    )
     return (
         f"✈️ <b>{label_origen} → {label_destino}</b>\n"
-        f"🏢 {vuelo['aerolinea']} {vuelo['vuelo']} · {vuelo['origen']}→{vuelo['destino']}\n"
-        f"💶 Precio: <b>{vuelo['precio']:.0f} {vuelo['moneda']}</b>\n"
-        f"📅 {vuelo['fecha_salida']}  {vuelo['hora_salida']} → {vuelo['hora_llegada']}"
+        f"🏢 {vuelo['aerolinea']}{vuelo_str} · {vuelo['origen']}→{vuelo['destino']}\n"
+        f"💶 Precio: <b>{vuelo['precio']:.0f} {simbolo}</b>\n"
+        f"📅 {vuelo['fecha_salida']}{horas}"
     )
 
 
@@ -109,20 +116,17 @@ def main():
     ry_ida = buscar_ryanair("ALC", "WMI")
     ry_vuelta = buscar_ryanair("WMI", "ALC")
 
-    # Mejor de cada dirección
-    ida = mejor_de(ry_ida, wz_ida)
-    vuelta = mejor_de(ry_vuelta, wz_vuelta)
-
     hoy_str = datetime.now(timezone.utc).strftime("%d/%m/%Y")
     cabecera = (
         f"🗓️ <b>Vuelos baratos — {hoy_str}</b>\n"
         f"<i>Proximos 4 meses · Ryanair (WMI) + Wizz Air (WAW)</i>\n\n"
     )
-    cuerpo = (
-        formatear(ida, "Alicante (ALC)", "Varsovia")
-        + "\n\n"
-        + formatear(vuelta, "Varsovia", "Alicante (ALC)")
-    )
+    cuerpo = "\n\n".join([
+        formatear(ry_ida,    "Alicante (ALC)", "Varsovia Modlin (WMI)"),
+        formatear(ry_vuelta, "Varsovia Modlin (WMI)", "Alicante (ALC)"),
+        formatear(wz_ida,    "Alicante (ALC)", "Varsovia Chopin (WAW)"),
+        formatear(wz_vuelta, "Varsovia Chopin (WAW)", "Alicante (ALC)"),
+    ])
 
     mensaje = cabecera + cuerpo
     print(mensaje)
