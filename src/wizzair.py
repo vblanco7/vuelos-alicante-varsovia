@@ -1,9 +1,12 @@
 """
 Búsqueda de vuelos Wizz Air mediante Playwright (navegador headless).
 
-Su API interna bloquea peticiones desde IPs de centros de datos.
-Playwright simula un navegador real, intercepta las respuestas de su
-propia API mientras navega el calendario de precios mes a mes.
+Estrategia:
+1. Abrir la página de selección de vuelo ALC↔WAW
+2. Aceptar cookies
+3. Pulsar "Mostrar próximo vuelo disponible" para saltar al primer vuelo
+4. Abrir el "Gráfico de precios" que muestra un mes completo
+5. Navegar 4 meses interceptando las respuestas de la API interna
 """
 
 import asyncio
@@ -12,71 +15,15 @@ from datetime import datetime, timezone
 from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeout
 
 
-_MESES_A_NAVEGAR = 4
-
-
 async def _aceptar_cookies(page) -> None:
-    """Acepta el banner de cookies/GDPR de Wizz Air."""
     try:
         btn = page.get_by_role("button", name="Aceptar todo")
         await btn.wait_for(state="visible", timeout=8000)
         await btn.click()
-        print("Wizz Air: cookies aceptadas")
         await page.wait_for_timeout(1500)
+        print("Wizz Air: cookies aceptadas")
     except PlaywrightTimeout:
-        # Si no aparece el banner, continuamos igualmente
         pass
-
-
-async def _esperar_precios(page) -> bool:
-    """Espera a que los precios del calendario sean visibles."""
-    # El spinner desaparece y aparecen los precios en el carrusel
-    selectores = [
-        ".flight-list-item__fare",
-        "[class*='fare-price']",
-        "[class*='flight-list__price']",
-        "text=/\\d+ €/",
-        "[data-test='flight-card']",
-    ]
-    for sel in selectores:
-        try:
-            await page.locator(sel).first.wait_for(state="visible", timeout=10000)
-            print(f"Wizz Air: precios visibles ({sel})")
-            return True
-        except PlaywrightTimeout:
-            continue
-    # Si no encontramos el selector específico, esperamos un tiempo fijo
-    await page.wait_for_timeout(8000)
-    return False
-
-
-async def _avanzar_mes(page) -> bool:
-    """Pulsa el botón de siguiente mes en el carrusel de fechas."""
-    selectores = [
-        # Botón con clase next en el carrusel de fechas
-        "button.bw-flight-list__button--next",
-        "[class*='flight-list'][class*='next']",
-        # Botón SVG flecha derecha en la cabecera del calendario
-        "button:has(svg[class*='arrow-right'])",
-        "button:has(svg[class*='chevron-right'])",
-        # Por aria-label
-        "button[aria-label='Next']",
-        "button[aria-label='Siguiente']",
-        # El > visible en la imagen está en el carrusel de días
-        ".bw-carousel__button--next",
-        "[class*='carousel'][class*='next']",
-        "[class*='carousel__button--next']",
-    ]
-    for sel in selectores:
-        try:
-            btn = page.locator(sel).first
-            if await btn.is_visible(timeout=2000):
-                await btn.click()
-                await page.wait_for_timeout(3000)
-                return True
-        except PlaywrightTimeout:
-            continue
-    return False
 
 
 async def _buscar_async(origen: str, destino: str) -> dict | None:
@@ -97,36 +44,51 @@ async def _buscar_async(origen: str, destino: str) -> dict | None:
         )
         page = await context.new_page()
 
-        # Interceptar respuestas de la API de búsqueda
-        async def capturar_respuesta(response):
+        # Interceptar todas las respuestas de búsqueda
+        async def capturar(response):
             nonlocal mejor
-            if "Api/search/search" in response.url and response.status == 200:
-                try:
-                    data = await response.json()
-                    vuelos = data.get("outboundFlights", [])
-                    print(f"Wizz Air API: {len(vuelos)} vuelos capturados")
-                    for vuelo in vuelos:
-                        precio = vuelo.get("price", {}).get("amount")
-                        if precio is None:
-                            continue
-                        if mejor is None or precio < mejor["precio"]:
-                            dep = vuelo.get("departureDateTimeUtc", "")
-                            arr = vuelo.get("arrivalDateTimeUtc", "")
-                            mejor = {
-                                "precio": precio,
-                                "moneda": vuelo["price"].get("currencyCode", "EUR"),
-                                "fecha_salida": dep[:10] if dep else "?",
-                                "hora_salida": dep[11:16] if len(dep) > 11 else "?",
-                                "hora_llegada": arr[11:16] if len(arr) > 11 else "?",
-                                "vuelo": vuelo.get("flightNumber", ""),
-                                "aerolinea": "Wizz Air",
-                                "origen": origen,
-                                "destino": destino,
-                            }
-                except Exception as e:
-                    print(f"Wizz Air: error parseando respuesta API: {e}")
+            if "Api/search/" not in response.url or response.status != 200:
+                return
+            try:
+                data = await response.json()
+                # search/search devuelve outboundFlights
+                vuelos = data.get("outboundFlights", [])
+                # search/farechart devuelve una estructura diferente
+                if not vuelos:
+                    for key in ("outboundFlights", "flights", "fares"):
+                        vuelos = data.get(key, [])
+                        if vuelos:
+                            break
+                if vuelos:
+                    print(f"Wizz Air API ({response.url.split('Api/search/')[-1].split('?')[0]}): {len(vuelos)} vuelos")
+                for vuelo in vuelos:
+                    precio = (
+                        vuelo.get("price", {}).get("amount")
+                        or vuelo.get("regularFare", {}).get("fares", [{}])[0].get("amount")
+                    )
+                    if precio is None:
+                        continue
+                    if mejor is None or precio < mejor["precio"]:
+                        dep = vuelo.get("departureDateTimeUtc") or vuelo.get("departureDate", "")
+                        arr = vuelo.get("arrivalDateTimeUtc") or vuelo.get("arrivalDate", "")
+                        mejor = {
+                            "precio": precio,
+                            "moneda": (
+                                vuelo.get("price", {}).get("currencyCode")
+                                or vuelo.get("currency", "EUR")
+                            ),
+                            "fecha_salida": dep[:10] if dep else "?",
+                            "hora_salida": dep[11:16] if len(dep) > 11 else "?",
+                            "hora_llegada": arr[11:16] if len(arr) > 11 else "?",
+                            "vuelo": vuelo.get("flightNumber", ""),
+                            "aerolinea": "Wizz Air",
+                            "origen": origen,
+                            "destino": destino,
+                        }
+            except Exception as e:
+                print(f"Wizz Air: error parseando respuesta: {e}")
 
-        page.on("response", capturar_respuesta)
+        page.on("response", capturar)
 
         hoy = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         url = (
@@ -142,37 +104,60 @@ async def _buscar_async(origen: str, destino: str) -> dict | None:
             await browser.close()
             return None
 
-        # 1. Aceptar cookies inmediatamente (antes de que bloquee la carga)
         await _aceptar_cookies(page)
+        await page.wait_for_timeout(3000)
 
-        # 2. Esperar a que los precios del primer mes sean visibles
-        await _esperar_precios(page)
+        # Paso 1: pulsar "Mostrar próximo vuelo disponible" si no hay vuelos hoy
+        try:
+            btn_proximo = page.get_by_role("button", name="Mostrar próximo vuelo disponible")
+            await btn_proximo.wait_for(state="visible", timeout=5000)
+            await btn_proximo.click()
+            await page.wait_for_timeout(3000)
+            print("Wizz Air: saltando al primer vuelo disponible")
+        except PlaywrightTimeout:
+            print("Wizz Air: hay vuelos en la fecha inicial, continuando")
 
-        # Screenshot de diagnóstico (primer mes ya cargado)
+        # Paso 2: abrir el gráfico de precios (carga un mes completo)
+        try:
+            btn_grafico = page.get_by_text("MOSTRAR GRÁFICO DE PRECIOS")
+            await btn_grafico.wait_for(state="visible", timeout=5000)
+            await btn_grafico.click()
+            await page.wait_for_timeout(4000)
+            print("Wizz Air: gráfico de precios abierto")
+
+            # Paso 3: navegar meses en el gráfico de precios
+            for mes in range(1, 4):
+                try:
+                    btn_next = page.locator("button").filter(has_text=">").last
+                    if not await btn_next.is_visible(timeout=2000):
+                        # Buscar por aria o clase
+                        btn_next = page.locator("[class*='next'], [aria-label*='next'], [aria-label*='Siguiente']").last
+                    await btn_next.click(timeout=3000)
+                    await page.wait_for_timeout(3000)
+                    print(f"Wizz Air: gráfico mes +{mes} cargado")
+                except Exception as e:
+                    print(f"Wizz Air: no pudo avanzar mes en gráfico +{mes}: {e}")
+                    break
+        except PlaywrightTimeout:
+            print("Wizz Air: no se encontró el gráfico de precios, usando vista de lista")
+
+        # Screenshot final para diagnóstico
         try:
             await page.screenshot(path=f"/tmp/wizz_{origen}_{destino}.png")
         except Exception:
             pass
 
-        # 3. Navegar mes a mes
-        for mes in range(1, _MESES_A_NAVEGAR):
-            avanzado = await _avanzar_mes(page)
-            if avanzado:
-                await _esperar_precios(page)
-                print(f"Wizz Air: mes +{mes} cargado")
-            else:
-                # Log de botones disponibles para depuración
-                print(f"Wizz Air: no se encontró botón siguiente en mes +{mes}")
+        # Paso 4 (fallback): si el gráfico no funcionó, navegar por el carrusel de días
+        if mejor is None:
+            print("Wizz Air: intentando navegación por carrusel de días")
+            for _ in range(16):  # ~16 clicks × ~7 días = ~4 meses
                 try:
-                    btns = await page.locator("button").all()
-                    for b in btns[:15]:
-                        txt = (await b.inner_text()).strip()
-                        cls = (await b.get_attribute("class") or "")[:50]
-                        if txt or "next" in cls.lower() or "arrow" in cls.lower():
-                            print(f"  [{cls}] '{txt[:40]}'")
-                except Exception:
-                    pass
-                break
+                    btn = page.locator("button[class*='next'], button[aria-label*='Next']").last
+                    if await btn.is_visible(timeout=2000):
+                        await btn.click()
+                        await page.wait_for_timeout(2000)
+                except PlaywrightTimeout:
+                    break
 
         await browser.close()
 
