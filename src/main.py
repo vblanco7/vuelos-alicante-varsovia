@@ -152,11 +152,13 @@ def formatear(vuelo, etiqueta_origen, etiqueta_destino):
 def enviar_telegram(mensaje):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {
-        "chat_id": TELEGRAM_CHAT_ID,
+        "chat_id": int(TELEGRAM_CHAT_ID.strip()),
         "text": mensaje,
         "parse_mode": "HTML",
     }
     r = requests.post(url, json=payload)
+    if not r.ok:
+        print(f"Telegram error {r.status_code}: {r.text}")
     r.raise_for_status()
 
 
