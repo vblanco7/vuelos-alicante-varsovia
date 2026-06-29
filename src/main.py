@@ -1,6 +1,6 @@
 import os
 import requests
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -56,7 +56,7 @@ def buscar_ryanair_mes(origen, destino, año, mes):
 
 
 def buscar_ryanair(origen, destino):
-    hoy = datetime.utcnow()
+    hoy = datetime.now(timezone.utc)
     mejor = None
     mejor_precio = float("inf")
     for año, mes in meses_rango(hoy, 4):
@@ -78,7 +78,7 @@ def buscar_ryanair(origen, destino):
 # ── Wizz Air ─────────────────────────────────────────────────────────────────
 
 def buscar_wizzair(origen, destino):
-    hoy = datetime.utcnow()
+    hoy = datetime.now(timezone.utc)
     fin = hoy + timedelta(days=120)
     params = {
         "departureStation": origen,
@@ -138,16 +138,13 @@ def mejor_vuelo_vuelta():
 
 def formatear(vuelo, etiqueta_origen, etiqueta_destino):
     if not vuelo:
-        return f"✈️ *{etiqueta_origen} → {etiqueta_destino}*\nSin vuelos directos disponibles."
+        return f"✈️ <b>{etiqueta_origen} → {etiqueta_destino}</b>\nSin vuelos directos disponibles."
 
     aeropuerto = vuelo["aeropuerto_destino"]
-    ciudad_destino = f"Varsovia ({aeropuerto})"
-    ciudad_origen = "Varsovia" if etiqueta_origen.startswith("WAW") or etiqueta_origen == "Varsovia" else "Alicante"
-
     return (
-        f"✈️ *{etiqueta_origen} → {etiqueta_destino}*\n"
-        f"🏢 Aerolínea: {vuelo['aerolinea']} · Aeropuerto: {aeropuerto}\n"
-        f"💶 Precio más barato: *{vuelo['precio']} {vuelo['moneda']}*\n"
+        f"✈️ <b>{etiqueta_origen} → {etiqueta_destino}</b>\n"
+        f"🏢 {vuelo['aerolinea']} · {aeropuerto}\n"
+        f"💶 Precio: <b>{vuelo['precio']} {vuelo['moneda']}</b>\n"
         f"📅 Fecha: {vuelo['fecha']}"
     )
 
@@ -157,7 +154,7 @@ def enviar_telegram(mensaje):
     payload = {
         "chat_id": TELEGRAM_CHAT_ID,
         "text": mensaje,
-        "parse_mode": "Markdown",
+        "parse_mode": "HTML",
     }
     r = requests.post(url, json=payload)
     r.raise_for_status()
@@ -167,8 +164,8 @@ def main():
     ida = mejor_vuelo_ida()
     vuelta = mejor_vuelo_vuelta()
 
-    hoy_str = datetime.utcnow().strftime("%d/%m/%Y")
-    cabecera = f"🗓️ *Vuelos baratos — {hoy_str}*\n_Búsqueda: próximos 4 meses · WAW + WMI_\n\n"
+    hoy_str = datetime.now(timezone.utc).strftime("%d/%m/%Y")
+    cabecera = f"🗓️ <b>Vuelos baratos — {hoy_str}</b>\n<i>Proximos 4 meses · WAW + WMI</i>\n\n"
     cuerpo = (
         formatear(ida, "Alicante (ALC)", "Varsovia")
         + "\n\n"
