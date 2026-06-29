@@ -29,3 +29,11 @@ jobs:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: python src/main.py
+
+      - name: Subir screenshots de depuración
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wizz-screenshots
+          path: /tmp/wizz_*.png
+          if-no-files-found: ignore

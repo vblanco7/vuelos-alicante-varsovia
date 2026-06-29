@@ -12,7 +12,31 @@ from datetime import datetime, timezone
 from playwright.async_api import async_playwright
 
 
-_MESES_A_NAVEGAR = 4  # cuántos meses hacia adelante buscar
+_MESES_A_NAVEGAR = 4
+
+
+async def _aceptar_cookies(page) -> None:
+    """Intenta cerrar banners de cookies/GDPR."""
+    selectores = [
+        "button#cookiescript_accept",
+        "button[data-test='accept-cookies']",
+        "button.cookie-accept",
+        "#onetrust-accept-btn-handler",
+        "button:has-text('Accept')",
+        "button:has-text('Aceptar')",
+        "button:has-text('Accept all')",
+        "button:has-text('Aceptar todo')",
+    ]
+    for sel in selectores:
+        try:
+            btn = page.locator(sel).first
+            if await btn.is_visible(timeout=2000):
+                await btn.click(timeout=3000)
+                print("Wizz Air Playwright: cookies aceptadas")
+                await page.wait_for_timeout(1000)
+                return
+        except Exception:
+            continue
 
 
 async def _buscar_async(origen: str, destino: str) -> dict | None:
@@ -33,7 +57,7 @@ async def _buscar_async(origen: str, destino: str) -> dict | None:
         )
         page = await context.new_page()
 
-        # Interceptar respuestas de la API de búsqueda de Wizz Air
+        # Interceptar respuestas de la API de búsqueda
         async def capturar_respuesta(response):
             nonlocal mejor
             if "Api/search/search" in response.url and response.status == 200:
@@ -57,39 +81,72 @@ async def _buscar_async(origen: str, destino: str) -> dict | None:
                                 "origen": origen,
                                 "destino": destino,
                             }
-                except Exception:
-                    pass
+                    print(f"Wizz Air API capturada: {len(data.get('outboundFlights', []))} vuelos")
+                except Exception as e:
+                    print(f"Wizz Air: error parseando respuesta: {e}")
 
         page.on("response", capturar_respuesta)
 
-        # Visitar la página de selección de vuelo (fecha = hoy)
         hoy = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         url = (
             f"https://www.wizzair.com/es-es/booking/select-flight"
             f"/{origen}/{destino}/{hoy}/null/1/0/0/null"
         )
-        print(f"Wizz Air Playwright: abriendo {url}")
+        print(f"Wizz Air Playwright: {origen}→{destino}")
 
         try:
-            await page.goto(url, wait_until="networkidle", timeout=45000)
+            await page.goto(url, wait_until="domcontentloaded", timeout=45000)
+            # Esperar carga dinámica
+            await page.wait_for_timeout(5000)
         except Exception as e:
-            print(f"Wizz Air Playwright: timeout cargando página inicial: {e}")
+            print(f"Wizz Air Playwright: error cargando página: {e}")
 
-        # Navegar mes a mes para cargar más precios
+        # Guardar screenshot para depuración
+        try:
+            await page.screenshot(path=f"/tmp/wizz_{origen}_{destino}.png")
+            print(f"Wizz Air Playwright: screenshot guardado en /tmp/wizz_{origen}_{destino}.png")
+        except Exception:
+            pass
+
+        # Aceptar cookies si aparece el banner
+        await _aceptar_cookies(page)
+        await page.wait_for_timeout(3000)
+
+        # Navegar mes a mes
+        # Wizz Air usa distintos selectores según la versión del front
+        selectores_siguiente = [
+            "button.bw-flight-list__button--next",
+            "button[class*='next']",
+            "[data-test='carousel-next']",
+            "button[aria-label='Next']",
+            "button[aria-label='Siguiente']",
+            "button svg[class*='arrow-right']",
+            ".flight-list__nav--next",
+        ]
+
         for mes in range(1, _MESES_A_NAVEGAR):
-            try:
-                # Botón "siguiente mes" en el carrusel de fechas
-                btn = page.locator(
-                    "button.bw-flight-list__button--next, "
-                    "[data-test='carousel-next'], "
-                    "button[aria-label='Next month'], "
-                    "button[aria-label='Siguiente mes']"
-                ).first
-                await btn.click(timeout=5000)
-                await page.wait_for_load_state("networkidle", timeout=10000)
-                print(f"Wizz Air Playwright: navegado al mes +{mes}")
-            except Exception as e:
-                print(f"Wizz Air Playwright: no se pudo avanzar al mes +{mes}: {e}")
+            avanzado = False
+            for sel in selectores_siguiente:
+                try:
+                    btn = page.locator(sel).first
+                    if await btn.is_visible(timeout=2000):
+                        await btn.click(timeout=3000)
+                        await page.wait_for_timeout(3000)
+                        print(f"Wizz Air Playwright: mes +{mes} cargado")
+                        avanzado = True
+                        break
+                except Exception:
+                    continue
+            if not avanzado:
+                print(f"Wizz Air Playwright: no se pudo avanzar al mes +{mes}, botones disponibles:")
+                try:
+                    btns = await page.locator("button").all()
+                    for b in btns[:10]:
+                        txt = await b.inner_text()
+                        cls = await b.get_attribute("class") or ""
+                        print(f"  [{cls[:40]}] '{txt[:30]}'")
+                except Exception:
+                    pass
                 break
 
         await browser.close()
@@ -103,5 +160,4 @@ async def _buscar_async(origen: str, destino: str) -> dict | None:
 
 
 def buscar_wizzair(origen: str, destino: str) -> dict | None:
-    """Punto de entrada síncrono para usar desde main.py."""
     return asyncio.run(_buscar_async(origen, destino))
