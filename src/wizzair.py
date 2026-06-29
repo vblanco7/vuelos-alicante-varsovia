@@ -1,173 +1,180 @@
+from __future__ import annotations
+
 """
-Búsqueda de vuelos Wizz Air mediante Playwright (navegador headless).
+Búsqueda de vuelos Wizz Air usando Playwright + asset/farechart.
 
 Estrategia:
-1. Abrir la página de selección de vuelo ALC↔WAW
-2. Aceptar cookies
-3. Pulsar "Mostrar próximo vuelo disponible" para saltar al primer vuelo
-4. Abrir el "Gráfico de precios" que muestra un mes completo
-5. Navegar 4 meses interceptando las respuestas de la API interna
+1. Cargar la home (warm-up de sesión y Kasada)
+2. Navegar al booking page (ALC↔WAW)
+3. Llamar asset/farechart via page.evaluate() — Kasada hookea fetch()
+   automáticamente y añade los tokens x-kpsdk-*
+4. Hacer 6 llamadas con dayInterval=10, cada una centrada 20 días más
+   adelante, para cubrir los próximos 4 meses
+5. Devolver el vuelo más barato en cada dirección
 """
 
 import asyncio
-from datetime import datetime, timezone
+import json
+from datetime import datetime, timezone, timedelta
 
 from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeout
 
+# URL de booking — usada solo para inicializar la sesión en be.wizzair.com
+_BOOKING_URL = (
+    "https://www.wizzair.com/es-es/booking/select-flight"
+    "/{origen}/{destino}/{hoy}/{hoy}/1/0/0/null"
+)
 
-async def _aceptar_cookies(page) -> None:
-    try:
-        btn = page.get_by_role("button", name="Aceptar todo")
-        await btn.wait_for(state="visible", timeout=8000)
-        await btn.click()
-        await page.wait_for_timeout(1500)
-        print("Wizz Air: cookies aceptadas")
-    except PlaywrightTimeout:
-        pass
+_FARECHART_JS = """
+async (payload) => {
+    const tokenMatch = document.cookie.match(/RequestVerificationToken=([^;]+)/);
+    const csrfToken = tokenMatch ? decodeURIComponent(tokenMatch[1]) : '';
+    try {
+        const resp = await fetch("https://be.wizzair.com/29.4.0/Api/asset/farechart", {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json",
+                "Accept": "application/json, text/plain, */*",
+                "x-requestverificationtoken": csrfToken,
+            },
+            body: JSON.stringify(payload),
+            credentials: "include",
+        });
+        if (!resp.ok) return {error: resp.status};
+        return {data: await resp.json()};
+    } catch(e) {
+        return {error: e.toString()};
+    }
+}
+"""
 
 
-async def _buscar_async(origen: str, destino: str) -> dict | None:
+def _mejor_vuelo(vuelos: list, origen: str, destino: str) -> dict | None:
     mejor = None
+    for v in vuelos:
+        precio = v.get("price", {}).get("amount")
+        if not precio:  # None o 0 = sin vuelo en esa fecha
+            continue
+        if mejor is None or precio < mejor["precio"]:
+            dep = v.get("date", "")
+            mejor = {
+                "precio": precio,
+                "moneda": v.get("price", {}).get("currencyCode", "EUR"),
+                "fecha_salida": dep[:10] if dep else "?",
+                "hora_salida": "?",
+                "hora_llegada": "?",
+                "vuelo": "",
+                "aerolinea": "Wizz Air",
+                "origen": origen,
+                "destino": destino,
+            }
+    return mejor
+
+
+async def _buscar_async(origen: str, destino: str) -> tuple[dict | None, dict | None]:
+    hoy = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(
             headless=True,
-            args=["--no-sandbox", "--disable-dev-shm-usage"],
+            args=["--no-sandbox", "--disable-blink-features=AutomationControlled"],
         )
         context = await browser.new_context(
             user_agent=(
-                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-                "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
             ),
             locale="es-ES",
             viewport={"width": 1366, "height": 768},
+            extra_http_headers={
+                "sec-ch-ua": '"Google Chrome";v="124", "Chromium";v="124", "Not-A.Brand";v="99"',
+                "sec-ch-ua-mobile": "?0",
+                "sec-ch-ua-platform": '"macOS"',
+            },
+        )
+        await context.add_init_script(
+            "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
         )
         page = await context.new_page()
 
-        # Interceptar todas las respuestas de búsqueda
-        async def capturar(response):
-            nonlocal mejor
-            if "Api/search/" not in response.url or response.status != 200:
-                return
-            try:
-                data = await response.json()
-                # search/search devuelve outboundFlights
-                vuelos = data.get("outboundFlights", [])
-                # search/farechart devuelve una estructura diferente
-                if not vuelos:
-                    for key in ("outboundFlights", "flights", "fares"):
-                        vuelos = data.get(key, [])
-                        if vuelos:
-                            break
-                if vuelos:
-                    print(f"Wizz Air API ({response.url.split('Api/search/')[-1].split('?')[0]}): {len(vuelos)} vuelos")
-                for vuelo in vuelos:
-                    precio = (
-                        vuelo.get("price", {}).get("amount")
-                        or vuelo.get("regularFare", {}).get("fares", [{}])[0].get("amount")
-                    )
-                    if precio is None:
-                        continue
-                    if mejor is None or precio < mejor["precio"]:
-                        dep = vuelo.get("departureDateTimeUtc") or vuelo.get("departureDate", "")
-                        arr = vuelo.get("arrivalDateTimeUtc") or vuelo.get("arrivalDate", "")
-                        mejor = {
-                            "precio": precio,
-                            "moneda": (
-                                vuelo.get("price", {}).get("currencyCode")
-                                or vuelo.get("currency", "EUR")
-                            ),
-                            "fecha_salida": dep[:10] if dep else "?",
-                            "hora_salida": dep[11:16] if len(dep) > 11 else "?",
-                            "hora_llegada": arr[11:16] if len(arr) > 11 else "?",
-                            "vuelo": vuelo.get("flightNumber", ""),
-                            "aerolinea": "Wizz Air",
-                            "origen": origen,
-                            "destino": destino,
-                        }
-            except Exception as e:
-                print(f"Wizz Air: error parseando respuesta: {e}")
-
-        page.on("response", capturar)
-
-        hoy = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        url = (
-            f"https://www.wizzair.com/es-es/booking/select-flight"
-            f"/{origen}/{destino}/{hoy}/null/1/0/0/null"
-        )
-        print(f"Wizz Air Playwright: {origen}→{destino}")
-
+        # 1. Warm-up: cargar home para inicializar sesión y Kasada
+        print(f"Wizz Air: cargando home (warm-up)...")
         try:
-            await page.goto(url, wait_until="domcontentloaded", timeout=45000)
-        except Exception as e:
-            print(f"Wizz Air Playwright: error cargando página: {e}")
-            await browser.close()
-            return None
-
-        await _aceptar_cookies(page)
-        await page.wait_for_timeout(3000)
-
-        # Paso 1: pulsar "Mostrar próximo vuelo disponible" si no hay vuelos hoy
-        try:
-            btn_proximo = page.get_by_role("button", name="Mostrar próximo vuelo disponible")
-            await btn_proximo.wait_for(state="visible", timeout=5000)
-            await btn_proximo.click()
+            await page.goto(
+                "https://www.wizzair.com/es-es",
+                wait_until="networkidle",
+                timeout=30000,
+            )
+            await page.get_by_role("button", name="Aceptar todo").click(timeout=6000)
             await page.wait_for_timeout(3000)
-            print("Wizz Air: saltando al primer vuelo disponible")
-        except PlaywrightTimeout:
-            print("Wizz Air: hay vuelos en la fecha inicial, continuando")
-
-        # Paso 2: abrir el gráfico de precios (carga un mes completo)
-        try:
-            btn_grafico = page.get_by_text("MOSTRAR GRÁFICO DE PRECIOS")
-            await btn_grafico.wait_for(state="visible", timeout=5000)
-            await btn_grafico.click()
-            await page.wait_for_timeout(4000)
-            print("Wizz Air: gráfico de precios abierto")
-
-            # Paso 3: navegar meses en el gráfico de precios
-            for mes in range(1, 4):
-                try:
-                    btn_next = page.locator("button").filter(has_text=">").last
-                    if not await btn_next.is_visible(timeout=2000):
-                        # Buscar por aria o clase
-                        btn_next = page.locator("[class*='next'], [aria-label*='next'], [aria-label*='Siguiente']").last
-                    await btn_next.click(timeout=3000)
-                    await page.wait_for_timeout(3000)
-                    print(f"Wizz Air: gráfico mes +{mes} cargado")
-                except Exception as e:
-                    print(f"Wizz Air: no pudo avanzar mes en gráfico +{mes}: {e}")
-                    break
-        except PlaywrightTimeout:
-            print("Wizz Air: no se encontró el gráfico de precios, usando vista de lista")
-
-        # Screenshot final para diagnóstico
-        try:
-            await page.screenshot(path=f"/tmp/wizz_{origen}_{destino}.png")
         except Exception:
             pass
 
-        # Paso 4 (fallback): si el gráfico no funcionó, navegar por el carrusel de días
-        if mejor is None:
-            print("Wizz Air: intentando navegación por carrusel de días")
-            for _ in range(16):  # ~16 clicks × ~7 días = ~4 meses
-                try:
-                    btn = page.locator("button[class*='next'], button[aria-label*='Next']").last
-                    if await btn.is_visible(timeout=2000):
-                        await btn.click()
-                        await page.wait_for_timeout(2000)
-                except PlaywrightTimeout:
-                    break
+        # 2. Navegar al booking page para establecer contexto en be.wizzair.com
+        booking_url = _BOOKING_URL.format(origen=origen, destino=destino, hoy=hoy)
+        print(f"Wizz Air: cargando booking page {origen}→{destino}...")
+        try:
+            await page.goto(booking_url, wait_until="domcontentloaded", timeout=45000)
+            await page.wait_for_timeout(3000)
+        except Exception as e:
+            print(f"Wizz Air: error cargando booking: {e}")
+            await browser.close()
+            return None, None
+
+        # 3. Llamar farechart 6 veces cubriendo 4 meses (~20 días por llamada)
+        todos_outbound: list = []
+        todos_return: list = []
+        base = datetime.now(timezone.utc)
+
+        for i in range(6):
+            centro = (base + timedelta(days=10 + i * 20)).strftime("%Y-%m-%dT00:00:00")
+            payload = {
+                "isRescueFare": False,
+                "adultCount": 1,
+                "childCount": 0,
+                "dayInterval": 10,
+                "wdc": False,
+                "isFlightChange": False,
+                "flightList": [
+                    {"departureStation": origen, "arrivalStation": destino, "date": centro},
+                    {"departureStation": destino, "arrivalStation": origen, "date": centro},
+                ],
+            }
+            try:
+                result = await page.evaluate(_FARECHART_JS, payload)
+                if "error" in result:
+                    print(f"Wizz Air farechart [{i+1}/6] error: {result['error']}")
+                    continue
+                data = result.get("data", {})
+                outbound = data.get("outboundFlights", [])
+                ret = data.get("returnFlights", [])
+                todos_outbound.extend(outbound)
+                todos_return.extend(ret)
+                print(f"Wizz Air farechart [{i+1}/6] centro={centro[:10]}: {len(outbound)} out / {len(ret)} ret")
+            except Exception as e:
+                print(f"Wizz Air farechart [{i+1}/6] excepción: {e}")
 
         await browser.close()
 
-    if mejor:
-        print(f"Wizz Air {origen}→{destino}: {mejor['precio']} {mejor['moneda']} el {mejor['fecha_salida']}")
+    mejor_ida = _mejor_vuelo(todos_outbound, origen, destino)
+    mejor_vuelta = _mejor_vuelo(todos_return, destino, origen)
+
+    if mejor_ida:
+        print(f"Wizz Air {origen}→{destino}: {mejor_ida['precio']} EUR el {mejor_ida['fecha_salida']}")
     else:
         print(f"Wizz Air {origen}→{destino}: sin resultados")
 
-    return mejor
+    if mejor_vuelta:
+        print(f"Wizz Air {destino}→{origen}: {mejor_vuelta['precio']} EUR el {mejor_vuelta['fecha_salida']}")
+    else:
+        print(f"Wizz Air {destino}→{origen}: sin resultados")
+
+    return mejor_ida, mejor_vuelta
 
 
-def buscar_wizzair(origen: str, destino: str) -> dict | None:
+def buscar_wizzair(origen: str, destino: str) -> tuple[dict | None, dict | None]:
+    """
+    Devuelve (mejor_ida, mejor_vuelta) o (None, None) si no hay datos.
+    Cada resultado es un dict con: precio, moneda, fecha_salida, aerolinea, origen, destino.
+    """
     return asyncio.run(_buscar_async(origen, destino))

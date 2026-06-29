@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import os
 import requests
 from datetime import datetime, timedelta, timezone
@@ -100,14 +102,15 @@ def enviar_telegram(mensaje: str) -> None:
 
 
 def main():
-    # ALC → Varsovia
-    ry_ida = buscar_ryanair("ALC", "WMI")        # Ryanair usa Modlin
-    wz_ida = buscar_wizzair("ALC", "WAW")         # Wizz Air usa Chopin
-    ida = mejor_de(ry_ida, wz_ida)
+    # Wizz Air: una sola sesión devuelve ambas direcciones
+    wz_ida, wz_vuelta = buscar_wizzair("ALC", "WAW")
 
-    # Varsovia → ALC
+    # Ryanair (Modlin)
+    ry_ida = buscar_ryanair("ALC", "WMI")
     ry_vuelta = buscar_ryanair("WMI", "ALC")
-    wz_vuelta = buscar_wizzair("WAW", "ALC")
+
+    # Mejor de cada dirección
+    ida = mejor_de(ry_ida, wz_ida)
     vuelta = mejor_de(ry_vuelta, wz_vuelta)
 
     hoy_str = datetime.now(timezone.utc).strftime("%d/%m/%Y")
