@@ -49,18 +49,22 @@ async (payload) => {
 """
 
 
-def _mejor_vuelo(vuelos: list, origen: str, destino: str) -> dict | None:
-    mejor = None
+def _candidatos(vuelos: list, origen: str, destino: str) -> list[dict]:
+    """Devuelve todos los vuelos con precio, deduplicados por fecha (precio mínimo)
+    y ordenados de más barato a más caro."""
+    por_fecha: dict[str, dict] = {}
     for v in vuelos:
         precio = v.get("price", {}).get("amount")
         if not precio:  # None o 0 = sin vuelo en esa fecha
             continue
-        if mejor is None or precio < mejor["precio"]:
-            dep = v.get("date", "")
-            mejor = {
+        dep = (v.get("date") or "")[:10]
+        if not dep:
+            continue
+        if dep not in por_fecha or precio < por_fecha[dep]["precio"]:
+            por_fecha[dep] = {
                 "precio": precio,
                 "moneda": v.get("price", {}).get("currencyCode", "EUR"),
-                "fecha_salida": dep[:10] if dep else "?",
+                "fecha_salida": dep,
                 "hora_salida": "?",
                 "hora_llegada": "?",
                 "vuelo": "",
@@ -68,10 +72,10 @@ def _mejor_vuelo(vuelos: list, origen: str, destino: str) -> dict | None:
                 "origen": origen,
                 "destino": destino,
             }
-    return mejor
+    return sorted(por_fecha.values(), key=lambda v: v["precio"])
 
 
-async def _buscar_async(origen: str, destino: str) -> tuple[dict | None, dict | None]:
+async def _buscar_async(origen: str, destino: str) -> tuple[list[dict], list[dict]]:
     hoy = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
     async with async_playwright() as pw:
@@ -119,7 +123,7 @@ async def _buscar_async(origen: str, destino: str) -> tuple[dict | None, dict | 
         except Exception as e:
             print(f"Wizz Air: error cargando booking: {e}")
             await browser.close()
-            return None, None
+            return [], []
 
         # 3. Llamar farechart 6 veces cubriendo 4 meses (~20 días por llamada)
         todos_outbound: list = []
@@ -156,25 +160,26 @@ async def _buscar_async(origen: str, destino: str) -> tuple[dict | None, dict | 
 
         await browser.close()
 
-    mejor_ida = _mejor_vuelo(todos_outbound, origen, destino)
-    mejor_vuelta = _mejor_vuelo(todos_return, destino, origen)
+    ida = _candidatos(todos_outbound, origen, destino)
+    vuelta = _candidatos(todos_return, destino, origen)
 
-    if mejor_ida:
-        print(f"Wizz Air {origen}→{destino}: {mejor_ida['precio']} EUR el {mejor_ida['fecha_salida']}")
+    if ida:
+        print(f"Wizz Air {origen}→{destino}: {len(ida)} fechas, mín {ida[0]['precio']} EUR el {ida[0]['fecha_salida']}")
     else:
         print(f"Wizz Air {origen}→{destino}: sin resultados")
 
-    if mejor_vuelta:
-        print(f"Wizz Air {destino}→{origen}: {mejor_vuelta['precio']} EUR el {mejor_vuelta['fecha_salida']}")
+    if vuelta:
+        print(f"Wizz Air {destino}→{origen}: {len(vuelta)} fechas, mín {vuelta[0]['precio']} EUR el {vuelta[0]['fecha_salida']}")
     else:
         print(f"Wizz Air {destino}→{origen}: sin resultados")
 
-    return mejor_ida, mejor_vuelta
+    return ida, vuelta
 
 
-def buscar_wizzair(origen: str, destino: str) -> tuple[dict | None, dict | None]:
+def buscar_wizzair(origen: str, destino: str) -> tuple[list[dict], list[dict]]:
     """
-    Devuelve (mejor_ida, mejor_vuelta) o (None, None) si no hay datos.
-    Cada resultado es un dict con: precio, moneda, fecha_salida, aerolinea, origen, destino.
+    Devuelve (ida, vuelta), cada uno una lista de vuelos ordenada de más barato
+    a más caro (lista vacía si no hay datos).
+    Cada vuelo es un dict con: precio, moneda, fecha_salida, aerolinea, origen, destino.
     """
     return asyncio.run(_buscar_async(origen, destino))
