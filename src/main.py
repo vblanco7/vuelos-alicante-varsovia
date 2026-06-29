@@ -12,7 +12,7 @@ load_dotenv()
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 
-RYANAIR_URL = "https://www.ryanair.com/api/farfnd/v4/oneWayFares"
+RYANAIR_URL = "https://www.ryanair.com/api/farfnd/v4/oneWayFares/{origen}/{destino}/cheapestPerDay"
 HEADERS_RYANAIR = {
     "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
                   "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -23,75 +23,113 @@ HEADERS_RYANAIR = {
 
 # ── Ryanair ──────────────────────────────────────────────────────────────────
 
-def buscar_ryanair(origen: str, destino: str) -> dict | None:
+def buscar_ryanair(origen: str, destino: str) -> list[dict]:
+    """Precio por día de los próximos ~4 meses (endpoint cheapestPerDay, una
+    llamada por mes). Devuelve lista ordenada de más barato a más caro."""
     hoy = datetime.now(timezone.utc)
-    fin = hoy + timedelta(days=120)
-    params = {
-        "departureAirportIataCode": origen,
-        "arrivalAirportIataCode": destino,
-        "outboundDepartureDateFrom": hoy.strftime("%Y-%m-%d"),
-        "outboundDepartureDateTo": fin.strftime("%Y-%m-%d"),
-        "market": "es-es",
-        "currency": "EUR",
-    }
-    try:
-        r = requests.get(RYANAIR_URL, params=params, headers=HEADERS_RYANAIR, timeout=15)
-        r.raise_for_status()
-        fares = r.json().get("fares", [])
-        disponibles = [
-            f for f in fares
-            if f.get("outbound") and f["outbound"].get("price")
-            and f["outbound"]["price"].get("value") is not None
-        ]
-        if not disponibles:
-            return None
-        mejor = min(disponibles, key=lambda f: f["outbound"]["price"]["value"])
-        ob = mejor["outbound"]
-        return {
-            "precio": ob["price"]["value"],
-            "moneda": ob["price"].get("currencySymbol", "€"),
-            "fecha_salida": ob["departureDate"][:10],
-            "hora_salida": ob["departureDate"][11:16],
-            "hora_llegada": ob["arrivalDate"][11:16],
-            "vuelo": ob.get("flightNumber", ""),
-            "aerolinea": "Ryanair",
-            "origen": origen,
-            "destino": destino,
-        }
-    except Exception as e:
-        print(f"Ryanair {origen}→{destino}: {e}")
-        return None
+    limite = (hoy + timedelta(days=120)).strftime("%Y-%m-%d")
+    hoy_iso = hoy.strftime("%Y-%m-%d")
+    url = RYANAIR_URL.format(origen=origen, destino=destino)
 
+    vuelos: list[dict] = []
+    # Mes actual + 4 siguientes (cubre 120 días con margen)
+    año, mes = hoy.year, hoy.month
+    for _ in range(5):
+        mes_str = f"{año:04d}-{mes:02d}-01"
+        try:
+            r = requests.get(
+                url,
+                params={"outboundMonthOfDate": mes_str, "currency": "EUR", "market": "es-es"},
+                headers=HEADERS_RYANAIR,
+                timeout=15,
+            )
+            r.raise_for_status()
+            fares = r.json().get("outbound", {}).get("fares", [])
+            for f in fares:
+                precio = (f.get("price") or {}).get("value")
+                dia = f.get("day", "")
+                if (precio is None or f.get("soldOut") or f.get("unavailable")
+                        or not dia or dia < hoy_iso or dia > limite):
+                    continue
+                vuelos.append({
+                    "precio": precio,
+                    "moneda": f["price"].get("currencySymbol", "€"),
+                    "fecha_salida": dia,
+                    "hora_salida": f.get("departureDate", "")[11:16] or "?",
+                    "hora_llegada": f.get("arrivalDate", "")[11:16] or "?",
+                    "vuelo": "",
+                    "aerolinea": "Ryanair",
+                    "origen": origen,
+                    "destino": destino,
+                })
+        except Exception as e:
+            print(f"Ryanair {origen}→{destino} {mes_str}: {e}")
+        mes += 1
+        if mes > 12:
+            mes, año = 1, año + 1
 
-# ── Comparar candidatos ───────────────────────────────────────────────────────
-
-def mejor_de(*vuelos) -> dict | None:
-    candidatos = [v for v in vuelos if v]
-    if not candidatos:
-        return None
-    return min(candidatos, key=lambda v: v["precio"])
+    vuelos.sort(key=lambda v: v["precio"])
+    return vuelos
 
 
 # ── Formato y Telegram ────────────────────────────────────────────────────────
 
-def formatear(vuelo: dict | None, label_origen: str, label_destino: str) -> str:
-    if not vuelo:
+# Alternativas hasta MARGEN € por encima del mínimo (por si una fecha mejor cuesta poco más)
+MARGEN = 15
+MAX_OPCIONES = 3
+_DIAS = ["lun", "mar", "mié", "jue", "vie", "sáb", "dom"]
+
+
+def _dia_semana(fecha_iso: str) -> tuple[str, str, bool]:
+    """Devuelve (abreviatura_dia, fecha_corta dd/mm, es_finde)."""
+    d = datetime.strptime(fecha_iso, "%Y-%m-%d")
+    idx = d.weekday()  # 0=lun … 6=dom
+    return _DIAS[idx], d.strftime("%d/%m"), idx >= 5
+
+
+def _enlace(v: dict) -> str:
+    fecha = v["fecha_salida"]
+    if v["aerolinea"] == "Ryanair":
         return (
-            f"✈️ <b>{label_origen} → {label_destino}</b>\n"
-            f"Sin vuelos directos disponibles en los próximos 4 meses."
+            "https://www.ryanair.com/es/es/trip/flights/select?"
+            f"adults=1&teens=0&children=0&infants=0&dateOut={fecha}&dateIn="
+            "&isConnectedFlight=false&discount=0&isReturn=false&promoCode="
+            f"&originIata={v['origen']}&destinationIata={v['destino']}"
         )
-    simbolo = "€" if vuelo["moneda"] in ("EUR", "€") else vuelo["moneda"]
-    vuelo_str = f" {vuelo['vuelo']}" if vuelo.get("vuelo") else ""
+    # Wizz Air
+    return (
+        "https://www.wizzair.com/es-es/booking/select-flight/"
+        f"{v['origen']}/{v['destino']}/{fecha}/{fecha}/1/0/0/null"
+    )
+
+
+def _linea_opcion(v: dict, minimo: float) -> str:
+    simbolo = "€" if v["moneda"] in ("EUR", "€") else v["moneda"]
+    dia, fecha_corta, finde = _dia_semana(v["fecha_salida"])
+    marca = " 🟢" if finde else ""
     horas = (
-        f"  {vuelo['hora_salida']} → {vuelo['hora_llegada']}"
-        if vuelo.get("hora_salida") and vuelo["hora_salida"] != "?"
+        f" · {v['hora_salida']}→{v['hora_llegada']}"
+        if v.get("hora_salida") and v["hora_salida"] != "?"
         else ""
     )
+    extra = v["precio"] - minimo
+    delta = f" (+{extra:.0f}{simbolo})" if extra > 0 else ""
+    texto = f"{v['precio']:.0f}{simbolo} · {dia} {fecha_corta}{marca}{horas}{delta}"
+    return f'  • <a href="{_enlace(v)}">{texto}</a>'
+
+
+def formatear(vuelos: list[dict] | None, label_origen: str, label_destino: str) -> str:
+    cabecera = f"✈️ <b>{label_origen} → {label_destino}</b>"
+    if not vuelos:
+        return cabecera + "\nSin vuelos directos disponibles en los próximos 4 meses."
+    vuelos = sorted(vuelos, key=lambda v: v["precio"])
+    minimo = vuelos[0]["precio"]
+    seleccion = [v for v in vuelos if v["precio"] <= minimo + MARGEN][:MAX_OPCIONES]
+    lineas = [_linea_opcion(v, minimo) for v in seleccion]
     return (
-        f"✈️ <b>{label_origen} → {label_destino}</b>\n"
-        f"🏢 {vuelo['aerolinea']}{vuelo_str} · {vuelo['origen']}→{vuelo['destino']}\n"
-        f"💶 Precio: <b>{vuelo['precio']:.0f} {simbolo}</b>\n"
-        f"📅 {vuelo['fecha_salida']}{horas}"
+        f"{cabecera}\n"
+        f"🏢 {vuelos[0]['aerolinea']} · {vuelos[0]['origen']}→{vuelos[0]['destino']}\n"
+        + "\n".join(lineas)
     )
 
 
@@ -101,6 +139,7 @@ def enviar_telegram(mensaje: str) -> None:
         "chat_id": int(TELEGRAM_CHAT_ID.strip()),
         "text": mensaje,
         "parse_mode": "HTML",
+        "disable_web_page_preview": True,
     }
     r = requests.post(url, json=payload)
     if not r.ok:
