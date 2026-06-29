@@ -7,48 +7,148 @@ load_dotenv()
 
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
-KIWI_API_KEY = os.environ["KIWI_API_KEY"]
 
-KIWI_URL = "https://api.tequila.kiwi.com/v2/search"
+RYANAIR_URL = "https://www.ryanair.com/api/farfnd/v4/oneWayFares"
+WIZZAIR_URL = "https://be.wizzair.com/14.5.0/Api/asset/calendar"
+
+HEADERS_RYANAIR = {
+    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+    "Accept": "application/json",
+}
+HEADERS_WIZZAIR = {
+    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+    "Accept": "application/json",
+    "x-requestid": "alc-waw-bot",
+}
 
 
-def buscar_vuelo_barato(origen, destino, fecha_desde, fecha_hasta):
-    headers = {"apikey": KIWI_API_KEY}
+def meses_rango(inicio: datetime, num_meses: int):
+    meses = []
+    for i in range(num_meses):
+        año = inicio.year + (inicio.month + i - 1) // 12
+        mes = (inicio.month + i - 1) % 12 + 1
+        meses.append((año, mes))
+    return meses
+
+
+# ── Ryanair ──────────────────────────────────────────────────────────────────
+
+def buscar_ryanair_mes(origen, destino, año, mes):
     params = {
-        "fly_from": origen,
-        "fly_to": destino,
-        "date_from": fecha_desde,
-        "date_to": fecha_hasta,
-        "direct_flights": 1,
-        "curr": "EUR",
-        "sort": "price",
-        "limit": 1,
+        "departureAirportIataCode": origen,
+        "arrivalAirportIataCode": destino,
+        "outboundMonthOfDate": f"{año}-{mes:02d}-01",
+        "market": "es-es",
     }
-    resp = requests.get(KIWI_URL, headers=headers, params=params)
-    resp.raise_for_status()
-    data = resp.json()
-    if data.get("data"):
-        return data["data"][0]
-    return None
+    try:
+        r = requests.get(RYANAIR_URL, params=params, headers=HEADERS_RYANAIR, timeout=10)
+        r.raise_for_status()
+        fares = r.json().get("fares", [])
+        disponibles = [
+            f for f in fares
+            if f.get("price") and f["price"].get("value") is not None
+        ]
+        if not disponibles:
+            return None
+        return min(disponibles, key=lambda f: f["price"]["value"])
+    except Exception:
+        return None
 
 
-def formatear_vuelo(vuelo, origen, destino):
+def buscar_ryanair(origen, destino):
+    hoy = datetime.utcnow()
+    mejor = None
+    mejor_precio = float("inf")
+    for año, mes in meses_rango(hoy, 4):
+        fare = buscar_ryanair_mes(origen, destino, año, mes)
+        if fare and fare["price"]["value"] < mejor_precio:
+            mejor_precio = fare["price"]["value"]
+            mejor = fare
+    if not mejor:
+        return None
+    return {
+        "precio": mejor["price"]["value"],
+        "moneda": mejor["price"].get("currencySymbol", "€"),
+        "fecha": mejor.get("day", "?"),
+        "aerolinea": "Ryanair",
+        "aeropuerto_destino": destino,
+    }
+
+
+# ── Wizz Air ─────────────────────────────────────────────────────────────────
+
+def buscar_wizzair(origen, destino):
+    hoy = datetime.utcnow()
+    fin = hoy + timedelta(days=120)
+    params = {
+        "departureStation": origen,
+        "arrivalStation": destino,
+        "from": hoy.strftime("%Y-%m-%d"),
+        "to": fin.strftime("%Y-%m-%d"),
+        "priceType": "regular",
+        "adultCount": 1,
+        "childCount": 0,
+        "infantCount": 0,
+    }
+    try:
+        r = requests.get(WIZZAIR_URL, params=params, headers=HEADERS_WIZZAIR, timeout=10)
+        r.raise_for_status()
+        dias = r.json().get("flightDates", [])
+        disponibles = [
+            d for d in dias
+            if d.get("price") and d["price"].get("amount") is not None
+        ]
+        if not disponibles:
+            return None
+        mejor = min(disponibles, key=lambda d: d["price"]["amount"])
+        return {
+            "precio": mejor["price"]["amount"],
+            "moneda": mejor["price"].get("currencyCode", "EUR"),
+            "fecha": mejor.get("date", "?")[:10],
+            "aerolinea": "Wizz Air",
+            "aeropuerto_destino": destino,
+        }
+    except Exception:
+        return None
+
+
+# ── Comparar y elegir el más barato ──────────────────────────────────────────
+
+def mejor_vuelo_ida():
+    """ALC → WAW/WMI: compara Ryanair (WMI) y Wizz Air (WAW)"""
+    ryanair = buscar_ryanair("ALC", "WMI")
+    wizzair = buscar_wizzair("ALC", "WAW")
+    candidatos = [v for v in [ryanair, wizzair] if v]
+    if not candidatos:
+        return None
+    return min(candidatos, key=lambda v: v["precio"])
+
+
+def mejor_vuelo_vuelta():
+    """WAW/WMI → ALC: compara Ryanair (WMI) y Wizz Air (WAW)"""
+    ryanair = buscar_ryanair("WMI", "ALC")
+    wizzair = buscar_wizzair("WAW", "ALC")
+    candidatos = [v for v in [ryanair, wizzair] if v]
+    if not candidatos:
+        return None
+    return min(candidatos, key=lambda v: v["precio"])
+
+
+# ── Formato y Telegram ────────────────────────────────────────────────────────
+
+def formatear(vuelo, etiqueta_origen, etiqueta_destino):
     if not vuelo:
-        return f"✈️ *{origen} → {destino}*\nSin vuelos directos disponibles en ese rango."
+        return f"✈️ *{etiqueta_origen} → {etiqueta_destino}*\nSin vuelos directos disponibles."
 
-    precio = vuelo["price"]
-    salida = datetime.utcfromtimestamp(vuelo["dTime"]).strftime("%d/%m/%Y %H:%M")
-    llegada = datetime.utcfromtimestamp(vuelo["aTime"]).strftime("%d/%m/%Y %H:%M")
-    aerolinea = vuelo["airlines"][0] if vuelo.get("airlines") else "?"
-    enlace = vuelo.get("deep_link", "")
+    aeropuerto = vuelo["aeropuerto_destino"]
+    ciudad_destino = f"Varsovia ({aeropuerto})"
+    ciudad_origen = "Varsovia" if etiqueta_origen.startswith("WAW") or etiqueta_origen == "Varsovia" else "Alicante"
 
     return (
-        f"✈️ *{origen} → {destino}*\n"
-        f"💶 Precio: *{precio} €*\n"
-        f"📅 Salida: {salida}\n"
-        f"🛬 Llegada: {llegada}\n"
-        f"🏢 Aerolínea: {aerolinea}\n"
-        f"🔗 [Ver vuelo]({enlace})"
+        f"✈️ *{etiqueta_origen} → {etiqueta_destino}*\n"
+        f"🏢 Aerolínea: {vuelo['aerolinea']} · Aeropuerto: {aeropuerto}\n"
+        f"💶 Precio más barato: *{vuelo['precio']} {vuelo['moneda']}*\n"
+        f"📅 Fecha: {vuelo['fecha']}"
     )
 
 
@@ -58,31 +158,26 @@ def enviar_telegram(mensaje):
         "chat_id": TELEGRAM_CHAT_ID,
         "text": mensaje,
         "parse_mode": "Markdown",
-        "disable_web_page_preview": False,
     }
-    resp = requests.post(url, json=payload)
-    resp.raise_for_status()
+    r = requests.post(url, json=payload)
+    r.raise_for_status()
 
 
 def main():
-    hoy = datetime.utcnow()
-    fin = hoy + timedelta(days=120)
-    fecha_desde = hoy.strftime("%d/%m/%Y")
-    fecha_hasta = fin.strftime("%d/%m/%Y")
+    ida = mejor_vuelo_ida()
+    vuelta = mejor_vuelo_vuelta()
 
-    alc_waw = buscar_vuelo_barato("ALC", "WAW", fecha_desde, fecha_hasta)
-    waw_alc = buscar_vuelo_barato("WAW", "ALC", fecha_desde, fecha_hasta)
-
-    hoy_str = hoy.strftime("%d/%m/%Y")
-    cabecera = f"🗓️ *Vuelos baratos — {hoy_str}*\n_Rango: próximos 4 meses_\n\n"
+    hoy_str = datetime.utcnow().strftime("%d/%m/%Y")
+    cabecera = f"🗓️ *Vuelos baratos — {hoy_str}*\n_Búsqueda: próximos 4 meses · WAW + WMI_\n\n"
     cuerpo = (
-        formatear_vuelo(alc_waw, "ALC", "WAW")
+        formatear(ida, "Alicante (ALC)", "Varsovia")
         + "\n\n"
-        + formatear_vuelo(waw_alc, "WAW", "ALC")
+        + formatear(vuelta, "Varsovia", "Alicante (ALC)")
     )
 
-    enviar_telegram(cabecera + cuerpo)
-    print("Mensaje enviado correctamente.")
+    mensaje = cabecera + cuerpo
+    enviar_telegram(mensaje)
+    print(mensaje)
 
 
 if __name__ == "__main__":

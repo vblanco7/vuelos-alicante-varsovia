@@ -1,4 +1,4 @@
-name: Vuelos diarios ALC-WAW
+name: Vuelos diarios ALC-WAW/WMI
 
 on:
   schedule:
@@ -25,5 +25,4 @@ jobs:
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          KIWI_API_KEY: ${{ secrets.KIWI_API_KEY }}
         run: python src/main.py
