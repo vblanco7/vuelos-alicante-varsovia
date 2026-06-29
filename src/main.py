@@ -1,7 +1,11 @@
+from __future__ import annotations
+
 import os
 import requests
 from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
+
+from wizzair import buscar_wizzair
 
 load_dotenv()
 
@@ -9,7 +13,7 @@ TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 
 RYANAIR_URL = "https://www.ryanair.com/api/farfnd/v4/oneWayFares"
-HEADERS = {
+HEADERS_RYANAIR = {
     "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
                   "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     "Accept": "application/json",
@@ -17,7 +21,9 @@ HEADERS = {
 }
 
 
-def buscar_ryanair(origen, destino):
+# ── Ryanair ──────────────────────────────────────────────────────────────────
+
+def buscar_ryanair(origen: str, destino: str) -> dict | None:
     hoy = datetime.now(timezone.utc)
     fin = hoy + timedelta(days=120)
     params = {
@@ -29,12 +35,13 @@ def buscar_ryanair(origen, destino):
         "currency": "EUR",
     }
     try:
-        r = requests.get(RYANAIR_URL, params=params, headers=HEADERS, timeout=15)
+        r = requests.get(RYANAIR_URL, params=params, headers=HEADERS_RYANAIR, timeout=15)
         r.raise_for_status()
         fares = r.json().get("fares", [])
         disponibles = [
             f for f in fares
-            if f.get("outbound") and f["outbound"].get("price") and f["outbound"]["price"].get("value") is not None
+            if f.get("outbound") and f["outbound"].get("price")
+            and f["outbound"]["price"].get("value") is not None
         ]
         if not disponibles:
             return None
@@ -52,21 +59,22 @@ def buscar_ryanair(origen, destino):
             "destino": destino,
         }
     except Exception as e:
-        print(f"Error Ryanair {origen}→{destino}: {e}")
+        print(f"Ryanair {origen}→{destino}: {e}")
         return None
 
 
-def mejor_vuelo(origen_principal, origen_alt, destino_principal, destino_alt):
-    """Busca en ambos aeropuertos de Varsovia y devuelve el más barato."""
-    r1 = buscar_ryanair(origen_principal, destino_principal)
-    r2 = buscar_ryanair(origen_alt, destino_alt)
-    candidatos = [v for v in [r1, r2] if v]
+# ── Comparar candidatos ───────────────────────────────────────────────────────
+
+def mejor_de(*vuelos) -> dict | None:
+    candidatos = [v for v in vuelos if v]
     if not candidatos:
         return None
     return min(candidatos, key=lambda v: v["precio"])
 
 
-def formatear(vuelo, label_origen, label_destino):
+# ── Formato y Telegram ────────────────────────────────────────────────────────
+
+def formatear(vuelo: dict | None, label_origen: str, label_destino: str) -> str:
     if not vuelo:
         return (
             f"✈️ <b>{label_origen} → {label_destino}</b>\n"
@@ -80,7 +88,7 @@ def formatear(vuelo, label_origen, label_destino):
     )
 
 
-def enviar_telegram(mensaje):
+def enviar_telegram(mensaje: str) -> None:
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {
         "chat_id": int(TELEGRAM_CHAT_ID.strip()),
@@ -94,15 +102,21 @@ def enviar_telegram(mensaje):
 
 
 def main():
-    # ALC → Varsovia: prueba WMI (Modlin) y WAW (Chopin)
-    ida = mejor_vuelo("ALC", "ALC", "WMI", "WAW")
-    # Varsovia → ALC: prueba desde WMI y WAW
-    vuelta = mejor_vuelo("WMI", "WAW", "ALC", "ALC")
+    # Wizz Air: una sola sesión devuelve ambas direcciones
+    wz_ida, wz_vuelta = buscar_wizzair("ALC", "WAW")
+
+    # Ryanair (Modlin)
+    ry_ida = buscar_ryanair("ALC", "WMI")
+    ry_vuelta = buscar_ryanair("WMI", "ALC")
+
+    # Mejor de cada dirección
+    ida = mejor_de(ry_ida, wz_ida)
+    vuelta = mejor_de(ry_vuelta, wz_vuelta)
 
     hoy_str = datetime.now(timezone.utc).strftime("%d/%m/%Y")
     cabecera = (
         f"🗓️ <b>Vuelos baratos — {hoy_str}</b>\n"
-        f"<i>Proximos 4 meses · WMI (Modlin) + WAW (Chopin)</i>\n\n"
+        f"<i>Proximos 4 meses · Ryanair (WMI) + Wizz Air (WAW)</i>\n\n"
     )
     cuerpo = (
         formatear(ida, "Alicante (ALC)", "Varsovia")
