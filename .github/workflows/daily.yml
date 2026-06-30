@@ -2,7 +2,7 @@ name: Vuelos diarios ALC-WAW/WMI
 
 on:
   schedule:
-    - cron: "0 7 * * *"  # 7:00 UTC = 9:00 hora España (verano)
+    - cron: "13 7 * * *"  # 7:13 UTC = 9:13 hora España (verano). Minuto != :00 para evitar la congestion de GitHub
   workflow_dispatch:       # permite lanzarlo manualmente desde GitHub
 
 jobs:
