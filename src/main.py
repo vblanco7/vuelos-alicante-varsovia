@@ -5,8 +5,6 @@ import requests
 from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
 
-from wizzair import buscar_wizzair
-
 load_dotenv()
 
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
@@ -148,23 +146,22 @@ def enviar_telegram(mensaje: str) -> None:
 
 
 def main():
-    # Wizz Air: una sola sesión devuelve ambas direcciones
-    wz_ida, wz_vuelta = buscar_wizzair("ALC", "WAW")
-
-    # Ryanair (Modlin)
-    ry_ida = buscar_ryanair("ALC", "WMI")
-    ry_vuelta = buscar_ryanair("WMI", "ALC")
+    # Ryanair vuela ambos aeropuertos de Varsovia: Modlin y Chopin
+    ry_ida_wmi = buscar_ryanair("ALC", "WMI")
+    ry_vuelta_wmi = buscar_ryanair("WMI", "ALC")
+    ry_ida_waw = buscar_ryanair("ALC", "WAW")
+    ry_vuelta_waw = buscar_ryanair("WAW", "ALC")
 
     hoy_str = datetime.now(timezone.utc).strftime("%d/%m/%Y")
     cabecera = (
         f"🗓️ <b>Vuelos baratos — {hoy_str}</b>\n"
-        f"<i>Proximos 4 meses · Ryanair (WMI) + Wizz Air (WAW)</i>\n\n"
+        f"<i>Proximos 4 meses · Ryanair (WMI + WAW)</i>\n\n"
     )
     cuerpo = "\n\n".join([
-        formatear(ry_ida,    "Alicante (ALC)", "Varsovia Modlin (WMI)"),
-        formatear(ry_vuelta, "Varsovia Modlin (WMI)", "Alicante (ALC)"),
-        formatear(wz_ida,    "Alicante (ALC)", "Varsovia Chopin (WAW)"),
-        formatear(wz_vuelta, "Varsovia Chopin (WAW)", "Alicante (ALC)"),
+        formatear(ry_ida_wmi,    "Alicante (ALC)", "Varsovia Modlin (WMI)"),
+        formatear(ry_vuelta_wmi, "Varsovia Modlin (WMI)", "Alicante (ALC)"),
+        formatear(ry_ida_waw,    "Alicante (ALC)", "Varsovia Chopin (WAW)"),
+        formatear(ry_vuelta_waw, "Varsovia Chopin (WAW)", "Alicante (ALC)"),
     ])
 
     mensaje = cabecera + cuerpo
